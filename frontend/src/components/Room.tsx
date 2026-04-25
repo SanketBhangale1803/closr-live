@@ -132,7 +132,7 @@ export const Room = ({
     const [currentRoomId, setCurrentRoomId] = useState<string | null>(null);
     const [participants, setParticipants] = useState<ParticipantState[]>([]);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
-    const [screenPreviewStream, setScreenPreviewStream] = useState<MediaStream | null>(null);
+    const [, setScreenPreviewStream] = useState<MediaStream | null>(null);
 
     // FIX: Play/pause now controls MediaStreamTrack.enabled on ALL tracks,
     // not just the HTMLVideoElement.pause() — so screen share audio also stops.
@@ -313,9 +313,9 @@ export const Room = ({
         [applyPlaybackState]
     );
 
-    const togglePlayback = useCallback(() => {
-        setPlaybackState(!isPlaybackPaused, true);
-    }, [isPlaybackPaused, setPlaybackState]);
+    // const togglePlayback = useCallback(() => {
+    //     setPlaybackState(!isPlaybackPaused, true);
+    // }, [isPlaybackPaused, setPlaybackState]);
 
     // -----------------------------------------------------------------------
     // WebRTC helpers
