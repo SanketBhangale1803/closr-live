@@ -11,21 +11,35 @@
   --border: #e2e8f0;
   --danger: #ef4444;
   --success: #22c55e;
-  
+
   --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
   --shadow-md: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
   --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
-  
+
   --radius: 0.75rem;
 }
 
-* {
+*,
+*::before,
+*::after {
   box-sizing: border-box;
   margin: 0;
   padding: 0;
 }
 
+/*
+ * Make html + body fill the viewport exactly.
+ * overflow:hidden stops the page from growing wider than 100vw
+ * when internal elements are positioned or have borders.
+ */
+html {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
+  height: 100%;
+  overflow: hidden;
   font-family: 'Inter', sans-serif;
   background-color: var(--bg-main);
   color: var(--text-main);
@@ -33,19 +47,33 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
+/* React root — must also fill full height so flex children can stretch */
+#root {
+  height: 100%;
+  overflow: hidden;
+}
+
 /* Utilities */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 0.75rem 1.5rem;
+  padding: 0.65rem 1.25rem;
   border-radius: var(--radius);
   font-weight: 600;
-  font-size: 0.95rem;
+  font-size: 0.9rem;
   transition: all 0.2s;
   border: none;
   cursor: pointer;
   box-shadow: var(--shadow-sm);
+  white-space: nowrap;
+}
+
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  transform: none !important;
+  box-shadow: none !important;
 }
 
 .btn-primary {
@@ -53,7 +81,7 @@ body {
   color: white;
 }
 
-.btn-primary:hover {
+.btn-primary:not(:disabled):hover {
   background: var(--primary-hover);
   transform: translateY(-1px);
   box-shadow: var(--shadow-md);
@@ -64,13 +92,19 @@ body {
   color: white;
 }
 
+.btn-danger:not(:disabled):hover {
+  filter: brightness(1.1);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+}
+
 .btn-secondary {
   background: white;
   border: 1px solid var(--border);
   color: var(--text-main);
 }
 
-.btn-secondary:hover {
+.btn-secondary:not(:disabled):hover {
   background: #f1f5f9;
 }
 
@@ -105,6 +139,8 @@ body {
   background: black;
   box-shadow: var(--shadow-md);
   position: relative;
+  width: 100%;
+  height: 100%;
 }
 
 .video-container video {
@@ -116,12 +152,14 @@ body {
 
 .badge {
   position: absolute;
-  bottom: 1rem;
-  left: 1rem;
+  bottom: 0.75rem;
+  left: 0.75rem;
   background: rgba(0, 0, 0, 0.6);
   color: white;
-  padding: 0.25rem 0.75rem;
+  padding: 0.2rem 0.6rem;
   border-radius: 9999px;
-  font-size: 0.875rem;
+  font-size: 0.8rem;
   backdrop-filter: blur(4px);
+  pointer-events: none;
+  user-select: none;
 }

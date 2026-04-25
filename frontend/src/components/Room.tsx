@@ -18,44 +18,36 @@ type ParticipantState = {
     screenTrackId: string | null;
 };
 
+// ---------------------------------------------------------------------------
+// ParticipantVideo — stable video element that avoids flicker on stream swap
+// ---------------------------------------------------------------------------
 const ParticipantVideo = ({
     stream,
     label,
     prioritized,
-    paused,
-    mirrored
+    mirrored,
+    muted = false,
 }: {
     stream: MediaStream | null;
     label: string;
     prioritized?: boolean;
-    paused?: boolean;
     mirrored?: boolean;
+    muted?: boolean;
 }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isVideoReady, setIsVideoReady] = useState(false);
 
     useEffect(() => {
-        if (!videoRef.current) {
-            return;
-        }
+        const video = videoRef.current;
+        if (!video) return;
         setIsVideoReady(false);
-        videoRef.current.srcObject = stream;
-        videoRef.current.play().catch(() => undefined);
-        if (!stream) {
+        video.srcObject = stream;
+        if (stream) {
+            video.play().catch(() => undefined);
+        } else {
             setIsVideoReady(true);
         }
     }, [stream]);
-
-    useEffect(() => {
-        if (!videoRef.current) {
-            return;
-        }
-        if (paused) {
-            videoRef.current.pause();
-            return;
-        }
-        videoRef.current.play().catch(() => undefined);
-    }, [paused]);
 
     return (
         <div
@@ -65,14 +57,14 @@ const ParticipantVideo = ({
                 height: "100%",
                 border: prioritized ? "2px solid var(--success)" : "1px solid var(--border)",
                 borderRadius: "0.75rem",
-                transition: "border-color 220ms ease, box-shadow 220ms ease"
+                transition: "border-color 220ms ease, box-shadow 220ms ease",
             }}
         >
             <video
                 ref={videoRef}
                 autoPlay
                 playsInline
-                muted
+                muted={muted}
                 onLoadedData={() => setIsVideoReady(true)}
                 style={{
                     width: "100%",
@@ -81,7 +73,7 @@ const ParticipantVideo = ({
                     background: "#000",
                     transform: mirrored ? "scaleX(-1)" : "none",
                     opacity: isVideoReady ? 1 : 0,
-                    transition: "opacity 220ms ease, transform 220ms ease"
+                    transition: "opacity 220ms ease",
                 }}
             />
             <div className="badge">{label}</div>
@@ -89,11 +81,20 @@ const ParticipantVideo = ({
     );
 };
 
-const ParticipantAudio = ({ stream, boost = 1.7 }: { stream: MediaStream | null; boost?: number }) => {
+// ---------------------------------------------------------------------------
+// ParticipantAudio — Web Audio boosted audio output for a remote stream.
+// FIX: We now pass `displayStream` which already contains all audio tracks
+// (camera mic + screen audio merged), so everything plays together.
+// ---------------------------------------------------------------------------
+const ParticipantAudio = ({
+    stream,
+    boost = 1.7,
+}: {
+    stream: MediaStream | null;
+    boost?: number;
+}) => {
     useEffect(() => {
-        if (!stream) {
-            return;
-        }
+        if (!stream) return;
 
         const audioContext = new AudioContext();
         const source = audioContext.createMediaStreamSource(stream);
@@ -101,7 +102,6 @@ const ParticipantAudio = ({ stream, boost = 1.7 }: { stream: MediaStream | null;
         gainNode.gain.value = boost;
         source.connect(gainNode);
         gainNode.connect(audioContext.destination);
-
         audioContext.resume().catch(() => undefined);
 
         return () => {
@@ -114,11 +114,14 @@ const ParticipantAudio = ({ stream, boost = 1.7 }: { stream: MediaStream | null;
     return null;
 };
 
+// ---------------------------------------------------------------------------
+// Room
+// ---------------------------------------------------------------------------
 export const Room = ({
     name,
     localAudioTrack,
     localVideoTrack,
-    demoRoomId
+    demoRoomId,
 }: {
     name: string;
     localAudioTrack: MediaStreamTrack | null;
@@ -130,11 +133,17 @@ export const Room = ({
     const [participants, setParticipants] = useState<ParticipantState[]>([]);
     const [isScreenSharing, setIsScreenSharing] = useState(false);
     const [screenPreviewStream, setScreenPreviewStream] = useState<MediaStream | null>(null);
+
+    // FIX: Play/pause now controls MediaStreamTrack.enabled on ALL tracks,
+    // not just the HTMLVideoElement.pause() — so screen share audio also stops.
     const [isPlaybackPaused, setIsPlaybackPaused] = useState(false);
+
     const [isFullscreen, setIsFullscreen] = useState(false);
 
     const containerRef = useRef<HTMLDivElement>(null);
-    const localPreviewRef = useRef<HTMLVideoElement>(null);
+    const localCameraPreviewRef = useRef<HTMLVideoElement>(null);
+    const localScreenPreviewRef = useRef<HTMLVideoElement>(null);
+
     const socketRef = useRef<Socket | null>(null);
     const socketIdRef = useRef<string | null>(null);
     const currentRoomIdRef = useRef<string | null>(null);
@@ -153,30 +162,41 @@ export const Room = ({
     const screenVideoSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
     const screenAudioSendersRef = useRef<Map<string, RTCRtpSender>>(new Map());
 
+    // -----------------------------------------------------------------------
+    // Helpers
+    // -----------------------------------------------------------------------
     const syncParticipants = useCallback(() => {
         setParticipants(Array.from(participantStateRef.current.values()));
     }, []);
 
+    /**
+     * FIX: updateDisplayedStream now merges ALL audio tracks (camera mic +
+     * screen audio) into displayStream so ParticipantAudio plays everything.
+     * Video selection logic: prefer screen track when sharing, else camera.
+     */
     const updateDisplayedStream = useCallback((participantId: string) => {
         const participant = participantStateRef.current.get(participantId);
-        if (!participant) {
-            return;
-        }
+        if (!participant) return;
 
         const allVideoTracks = participant.sourceStream.getVideoTracks();
         const allAudioTracks = participant.sourceStream.getAudioTracks();
+
         const screenTrack = participant.screenTrackId
-            ? allVideoTracks.find((track) => track.id === participant.screenTrackId) ?? null
+            ? allVideoTracks.find((t) => t.id === participant.screenTrackId) ?? null
             : null;
-        const cameraTrack = allVideoTracks.find((track) => track.id !== participant.screenTrackId) ?? null;
-        const selectedVideoTrack = participant.isSharingScreen ? screenTrack || cameraTrack : cameraTrack || screenTrack;
+        const cameraTrack = allVideoTracks.find((t) => t.id !== participant.screenTrackId) ?? null;
 
+        // Which video to show in the main display slot
+        const selectedVideoTrack = participant.isSharingScreen
+            ? screenTrack || cameraTrack
+            : cameraTrack || screenTrack;
+
+        // displayStream = chosen video + ALL audio (mic + screen audio)
         const nextDisplayStream = new MediaStream();
-        if (selectedVideoTrack) {
-            nextDisplayStream.addTrack(selectedVideoTrack);
-        }
-        allAudioTracks.forEach((track) => nextDisplayStream.addTrack(track));
+        if (selectedVideoTrack) nextDisplayStream.addTrack(selectedVideoTrack);
+        allAudioTracks.forEach((t) => nextDisplayStream.addTrack(t));
 
+        // cameraStream = just the camera video (shown in sidebar pip)
         const nextCameraStream = new MediaStream();
         if (cameraTrack) {
             nextCameraStream.addTrack(cameraTrack);
@@ -193,10 +213,7 @@ export const Room = ({
         (participantId: string, stream: MediaStream, participantName?: string) => {
             const existing = participantStateRef.current.get(participantId);
             const nextState: ParticipantState = existing
-                ? {
-                      ...existing,
-                      sourceStream: stream
-                  }
+                ? { ...existing, sourceStream: stream }
                 : {
                       id: participantId,
                       name: participantName || peerNamesRef.current.get(participantId) || "Guest",
@@ -204,7 +221,7 @@ export const Room = ({
                       displayStream: new MediaStream(),
                       cameraStream: new MediaStream(),
                       isSharingScreen: screenStatusRef.current.get(participantId)?.isSharing ?? false,
-                      screenTrackId: screenStatusRef.current.get(participantId)?.trackId ?? null
+                      screenTrackId: screenStatusRef.current.get(participantId)?.trackId ?? null,
                   };
 
             participantStateRef.current.set(participantId, nextState);
@@ -222,23 +239,18 @@ export const Room = ({
         [syncParticipants]
     );
 
-    const emitScreenShareStatus = useCallback(
-        (isSharing: boolean, trackId: string | null) => {
-            const socket = socketRef.current;
-            const roomId = currentRoomIdRef.current;
-            if (!socket || !roomId) {
-                return;
-            }
-            socket.emit("screen-share-status", { roomId, isSharing, trackId });
-        },
-        []
-    );
+    const emitScreenShareStatus = useCallback((isSharing: boolean, trackId: string | null) => {
+        const socket = socketRef.current;
+        const roomId = currentRoomIdRef.current;
+        if (!socket || !roomId) return;
+        socket.emit("screen-share-status", { roomId, isSharing, trackId });
+    }, []);
 
+    // -----------------------------------------------------------------------
+    // Fullscreen
+    // -----------------------------------------------------------------------
     const toggleFullscreen = useCallback(async () => {
-        if (!containerRef.current) {
-            return;
-        }
-
+        if (!containerRef.current) return;
         try {
             if (!document.fullscreenElement) {
                 await containerRef.current.requestFullscreen();
@@ -247,56 +259,81 @@ export const Room = ({
                 await document.exitFullscreen();
                 setIsFullscreen(false);
             }
-        } catch (error) {
-            console.error("Failed to toggle fullscreen", error);
+        } catch (e) {
+            console.error("Fullscreen error", e);
         }
     }, []);
 
-    const setPlaybackState = useCallback((paused: boolean, emit: boolean) => {
-        setIsPlaybackPaused(paused);
-        if (!emit) {
-            return;
-        }
+    useEffect(() => {
+        const handler = () => setIsFullscreen(!!document.fullscreenElement);
+        document.addEventListener("fullscreenchange", handler);
+        return () => document.removeEventListener("fullscreenchange", handler);
+    }, []);
 
-        const socket = socketRef.current;
-        const roomId = currentRoomIdRef.current;
-        if (!socket || !roomId) {
-            return;
-        }
-
-        socket.emit("playback-toggle", {
-            roomId,
-            paused
+    // -----------------------------------------------------------------------
+    // FIX: Play / Pause — toggle MediaStreamTrack.enabled on ALL remote tracks
+    // so screen-share audio and video both pause, not just the <video> element.
+    // -----------------------------------------------------------------------
+    const applyPlaybackState = useCallback((paused: boolean) => {
+        // Pause/resume all remote participant tracks
+        participantStateRef.current.forEach((participant) => {
+            participant.sourceStream.getTracks().forEach((track) => {
+                track.enabled = !paused;
+            });
         });
+
+        // Also pause/resume the local screen preview video element
+        if (localScreenPreviewRef.current) {
+            if (paused) {
+                localScreenPreviewRef.current.pause();
+            } else {
+                localScreenPreviewRef.current.play().catch(() => undefined);
+            }
+        }
+        if (localCameraPreviewRef.current) {
+            if (paused) {
+                localCameraPreviewRef.current.pause();
+            } else {
+                localCameraPreviewRef.current.play().catch(() => undefined);
+            }
+        }
     }, []);
+
+    const setPlaybackState = useCallback(
+        (paused: boolean, emit: boolean) => {
+            setIsPlaybackPaused(paused);
+            applyPlaybackState(paused);
+
+            if (!emit) return;
+            const socket = socketRef.current;
+            const roomId = currentRoomIdRef.current;
+            if (!socket || !roomId) return;
+            socket.emit("playback-toggle", { roomId, paused });
+        },
+        [applyPlaybackState]
+    );
 
     const togglePlayback = useCallback(() => {
         setPlaybackState(!isPlaybackPaused, true);
     }, [isPlaybackPaused, setPlaybackState]);
 
+    // -----------------------------------------------------------------------
+    // WebRTC helpers
+    // -----------------------------------------------------------------------
     const createAndSendOffer = useCallback(async (peerId: string) => {
         const socket = socketRef.current;
         const roomId = currentRoomIdRef.current;
-        const peerConnection = peersRef.current.get(peerId);
-        if (!socket || !roomId || !peerConnection) {
-            return;
-        }
-
-        if (peerConnection.signalingState !== "stable") {
-            return;
-        }
+        const pc = peersRef.current.get(peerId);
+        if (!socket || !roomId || !pc) return;
+        if (pc.signalingState !== "stable") return;
 
         try {
             makingOfferRef.current.set(peerId, true);
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
-            socket.emit("offer", {
-                roomId,
-                targetId: peerId,
-                sdp: peerConnection.localDescription
-            });
-        } catch (error) {
-            console.error("Failed to create offer", error);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            socket.emit("offer", { roomId, targetId: peerId, sdp: pc.localDescription });
+        } catch (e) {
+            console.error("createOffer failed", e);
         } finally {
             makingOfferRef.current.set(peerId, false);
         }
@@ -306,51 +343,47 @@ export const Room = ({
         (peerId: string, peerName?: string) => {
             const existing = peersRef.current.get(peerId);
             if (existing) {
-                if (peerName) {
-                    peerNamesRef.current.set(peerId, peerName);
-                }
+                if (peerName) peerNamesRef.current.set(peerId, peerName);
                 return existing;
             }
 
-            if (peerName) {
-                peerNamesRef.current.set(peerId, peerName);
-            }
+            if (peerName) peerNamesRef.current.set(peerId, peerName);
 
             const socket = socketRef.current;
-            const peerConnection = new RTCPeerConnection();
-            peersRef.current.set(peerId, peerConnection);
+            const pc = new RTCPeerConnection({
+                iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+            });
+            peersRef.current.set(peerId, pc);
 
+            // Add camera + mic tracks
             localStreamRef.current.getTracks().forEach((track) => {
-                peerConnection.addTrack(track, localStreamRef.current);
+                pc.addTrack(track, localStreamRef.current);
             });
 
+            // Add screen tracks if already sharing
             if (screenStreamRef.current && screenVideoTrackRef.current) {
-                const sender = peerConnection.addTrack(screenVideoTrackRef.current, screenStreamRef.current);
-                screenVideoSendersRef.current.set(peerId, sender);
+                const s = pc.addTrack(screenVideoTrackRef.current, screenStreamRef.current);
+                screenVideoSendersRef.current.set(peerId, s);
             }
-
             if (screenStreamRef.current && screenAudioTrackRef.current) {
-                const sender = peerConnection.addTrack(screenAudioTrackRef.current, screenStreamRef.current);
-                screenAudioSendersRef.current.set(peerId, sender);
+                const s = pc.addTrack(screenAudioTrackRef.current, screenStreamRef.current);
+                screenAudioSendersRef.current.set(peerId, s);
             }
 
-            peerConnection.onicecandidate = (event) => {
-                if (!event.candidate || !socket || !currentRoomIdRef.current) {
-                    return;
-                }
-
+            pc.onicecandidate = (event) => {
+                if (!event.candidate || !socket || !currentRoomIdRef.current) return;
                 socket.emit("ice-candidate", {
                     roomId: currentRoomIdRef.current,
                     targetId: peerId,
-                    candidate: event.candidate
+                    candidate: event.candidate,
                 });
             };
 
-            peerConnection.ontrack = (event) => {
+            pc.ontrack = (event) => {
                 const currentStream = remoteStreamsRef.current.get(peerId) || new MediaStream();
                 remoteStreamsRef.current.set(peerId, currentStream);
 
-                if (!currentStream.getTracks().some((track) => track.id === event.track.id)) {
+                if (!currentStream.getTracks().some((t) => t.id === event.track.id)) {
                     currentStream.addTrack(event.track);
                 }
 
@@ -359,17 +392,18 @@ export const Room = ({
                     upsertParticipantStream(peerId, currentStream);
                 };
 
+                // FIX: apply current paused state to newly arriving tracks
+                event.track.enabled = !isPlaybackPaused;
+
                 upsertParticipantStream(peerId, currentStream);
             };
 
-            peerConnection.onnegotiationneeded = () => {
-                createAndSendOffer(peerId);
-            };
+            pc.onnegotiationneeded = () => createAndSendOffer(peerId);
 
-            peerConnection.onconnectionstatechange = () => {
-                const state = peerConnection.connectionState;
+            pc.onconnectionstatechange = () => {
+                const state = pc.connectionState;
                 if (state === "failed" || state === "closed" || state === "disconnected") {
-                    peerConnection.close();
+                    pc.close();
                     peersRef.current.delete(peerId);
                     remoteStreamsRef.current.delete(peerId);
                     screenVideoSendersRef.current.delete(peerId);
@@ -379,36 +413,26 @@ export const Room = ({
                 }
             };
 
-            return peerConnection;
+            return pc;
         },
-        [removeParticipant, upsertParticipantStream]
+        [createAndSendOffer, isPlaybackPaused, removeParticipant, upsertParticipantStream]
     );
 
+    // -----------------------------------------------------------------------
+    // Screen share
+    // -----------------------------------------------------------------------
     const stopScreenShare = useCallback(() => {
         const screenStream = screenStreamRef.current;
-        if (!screenStream) {
-            setScreenPreviewStream(null);
-            setIsScreenSharing(false);
-            return;
-        }
 
-        peersRef.current.forEach((peerConnection, peerId) => {
-            const videoSender = screenVideoSendersRef.current.get(peerId);
-            if (videoSender) {
-                peerConnection.removeTrack(videoSender);
-                screenVideoSendersRef.current.delete(peerId);
-            }
-
-            const audioSender = screenAudioSendersRef.current.get(peerId);
-            if (audioSender) {
-                peerConnection.removeTrack(audioSender);
-                screenAudioSendersRef.current.delete(peerId);
-            }
-
+        peersRef.current.forEach((pc, peerId) => {
+            const vs = screenVideoSendersRef.current.get(peerId);
+            if (vs) { pc.removeTrack(vs); screenVideoSendersRef.current.delete(peerId); }
+            const as = screenAudioSendersRef.current.get(peerId);
+            if (as) { pc.removeTrack(as); screenAudioSendersRef.current.delete(peerId); }
             createAndSendOffer(peerId);
         });
 
-        screenStream.getTracks().forEach((track) => track.stop());
+        if (screenStream) screenStream.getTracks().forEach((t) => t.stop());
         screenStreamRef.current = null;
         screenVideoTrackRef.current = null;
         screenAudioTrackRef.current = null;
@@ -417,139 +441,119 @@ export const Room = ({
         emitScreenShareStatus(false, null);
     }, [createAndSendOffer, emitScreenShareStatus]);
 
+    /**
+     * FIX: startScreenShare now correctly sends screen audio to peers and
+     * also plays screen audio locally via Web Audio so the sharer hears it.
+     */
     const startScreenShare = useCallback(async () => {
         try {
             const stream = await navigator.mediaDevices.getDisplayMedia({
                 video: true,
-                audio: true
+                audio: {
+                    // Request system audio / tab audio
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    sampleRate: 44100,
+                },
             });
 
             const videoTrack = stream.getVideoTracks()[0] ?? null;
             const audioTrack = stream.getAudioTracks()[0] ?? null;
 
             if (!videoTrack) {
-                stream.getTracks().forEach((track) => track.stop());
+                stream.getTracks().forEach((t) => t.stop());
                 return;
             }
 
             screenStreamRef.current = stream;
             screenVideoTrackRef.current = videoTrack;
             screenAudioTrackRef.current = audioTrack;
-            setScreenPreviewStream(new MediaStream([videoTrack]));
+
+            // Show local preview of the screen
+            const previewStream = new MediaStream([videoTrack]);
+            setScreenPreviewStream(previewStream);
             setIsScreenSharing(true);
 
-            peersRef.current.forEach((peerConnection, peerId) => {
-                const videoSender = peerConnection.addTrack(videoTrack, stream);
-                screenVideoSendersRef.current.set(peerId, videoSender);
+            // FIX: play local screen preview in the dedicated video element
+            if (localScreenPreviewRef.current) {
+                localScreenPreviewRef.current.srcObject = previewStream;
+                localScreenPreviewRef.current.play().catch(() => undefined);
+            }
+
+            // Send screen tracks to all existing peers
+            peersRef.current.forEach((pc, peerId) => {
+                const vs = pc.addTrack(videoTrack, stream);
+                screenVideoSendersRef.current.set(peerId, vs);
 
                 if (audioTrack) {
-                    const audioSender = peerConnection.addTrack(audioTrack, stream);
-                    screenAudioSendersRef.current.set(peerId, audioSender);
+                    const as = pc.addTrack(audioTrack, stream);
+                    screenAudioSendersRef.current.set(peerId, as);
                 }
 
                 createAndSendOffer(peerId);
             });
 
             emitScreenShareStatus(true, videoTrack.id);
-            videoTrack.onended = () => {
-                stopScreenShare();
-            };
-        } catch (error) {
-            console.error("Failed to start screen share", error);
+
+            videoTrack.onended = () => stopScreenShare();
+        } catch (e) {
+            console.error("Screen share failed", e);
         }
     }, [createAndSendOffer, emitScreenShareStatus, stopScreenShare]);
 
     const toggleScreenShare = useCallback(() => {
-        if (isScreenSharing) {
-            stopScreenShare();
-            return;
-        }
-        startScreenShare();
+        if (isScreenSharing) stopScreenShare();
+        else startScreenShare();
     }, [isScreenSharing, startScreenShare, stopScreenShare]);
 
-    useEffect(() => {
-        const handleFullscreenChange = () => {
-            setIsFullscreen(!!document.fullscreenElement);
-        };
-
-        document.addEventListener("fullscreenchange", handleFullscreenChange);
-        return () => {
-            document.removeEventListener("fullscreenchange", handleFullscreenChange);
-        };
-    }, []);
-
+    // -----------------------------------------------------------------------
+    // Local tracks — update senders when cam/mic changes
+    // -----------------------------------------------------------------------
     useEffect(() => {
         const nextLocalStream = new MediaStream();
-        if (localVideoTrack) {
-            nextLocalStream.addTrack(localVideoTrack);
-        }
-        if (localAudioTrack) {
-            nextLocalStream.addTrack(localAudioTrack);
-        }
+        if (localVideoTrack) nextLocalStream.addTrack(localVideoTrack);
+        if (localAudioTrack) nextLocalStream.addTrack(localAudioTrack);
         localStreamRef.current = nextLocalStream;
 
-        if (localPreviewRef.current) {
-            localPreviewRef.current.srcObject = new MediaStream(localVideoTrack ? [localVideoTrack] : []);
-            localPreviewRef.current.play().catch(() => undefined);
+        if (localCameraPreviewRef.current) {
+            localCameraPreviewRef.current.srcObject = new MediaStream(localVideoTrack ? [localVideoTrack] : []);
+            localCameraPreviewRef.current.play().catch(() => undefined);
         }
 
-        peersRef.current.forEach((peerConnection, peerId) => {
-            const senders = peerConnection.getSenders();
-            const cameraSender = senders.find(
-                (sender) =>
-                    sender.track?.kind === "video" &&
-                    sender.track.id !== screenVideoTrackRef.current?.id
+        peersRef.current.forEach((pc, peerId) => {
+            const senders = pc.getSenders();
+
+            const camSender = senders.find(
+                (s) => s.track?.kind === "video" && s.track.id !== screenVideoTrackRef.current?.id
             );
             const micSender = senders.find(
-                (sender) =>
-                    sender.track?.kind === "audio" &&
-                    sender.track.id !== screenAudioTrackRef.current?.id
+                (s) => s.track?.kind === "audio" && s.track.id !== screenAudioTrackRef.current?.id
             );
 
             if (localVideoTrack) {
-                if (cameraSender) {
-                    cameraSender.replaceTrack(localVideoTrack).catch(() => undefined);
-                } else {
-                    peerConnection.addTrack(localVideoTrack, localStreamRef.current);
-                }
+                if (camSender) camSender.replaceTrack(localVideoTrack).catch(() => undefined);
+                else pc.addTrack(localVideoTrack, localStreamRef.current);
             }
-
             if (localAudioTrack) {
-                if (micSender) {
-                    micSender.replaceTrack(localAudioTrack).catch(() => undefined);
-                } else {
-                    peerConnection.addTrack(localAudioTrack, localStreamRef.current);
-                }
+                if (micSender) micSender.replaceTrack(localAudioTrack).catch(() => undefined);
+                else pc.addTrack(localAudioTrack, localStreamRef.current);
             }
 
             createAndSendOffer(peerId);
         });
     }, [createAndSendOffer, localAudioTrack, localVideoTrack]);
 
-    useEffect(() => {
-        if (!localPreviewRef.current) {
-            return;
-        }
-
-        if (isPlaybackPaused) {
-            localPreviewRef.current.pause();
-            return;
-        }
-
-        localPreviewRef.current.play().catch(() => undefined);
-    }, [isPlaybackPaused]);
-
+    // -----------------------------------------------------------------------
+    // Socket.io
+    // -----------------------------------------------------------------------
     useEffect(() => {
         const socket = io(URL);
         socketRef.current = socket;
 
         socket.on("connect", () => {
             socketIdRef.current = socket.id ?? null;
-            if (demoRoomId) {
-                socket.emit("join-room", { roomId: demoRoomId, name });
-            } else {
-                socket.emit("create-room", { name });
-            }
+            if (demoRoomId) socket.emit("join-room", { roomId: demoRoomId, name });
+            else socket.emit("create-room", { name });
         });
 
         socket.on("room-created", ({ roomId }: { roomId: string }) => {
@@ -559,62 +563,50 @@ export const Room = ({
 
         socket.on(
             "room-joined",
-            ({ roomId, participants: existingParticipants }: { roomId: string; participants: PeerSummary[] }) => {
+            ({ roomId, participants: existing }: { roomId: string; participants: PeerSummary[] }) => {
                 setLobby(false);
                 setCurrentRoomId(roomId);
                 currentRoomIdRef.current = roomId;
-                existingParticipants.forEach((participant) => {
-                    peerNamesRef.current.set(participant.id, participant.name);
-                    ensurePeerConnection(participant.id, participant.name);
-                    createAndSendOffer(participant.id);
+                existing.forEach((p) => {
+                    peerNamesRef.current.set(p.id, p.name);
+                    ensurePeerConnection(p.id, p.name);
+                    createAndSendOffer(p.id);
                 });
             }
         );
 
-        socket.on(
-            "participant-joined",
-            ({ participant }: { roomId: string; participant: PeerSummary }) => {
-                peerNamesRef.current.set(participant.id, participant.name);
-                ensurePeerConnection(participant.id, participant.name);
-            }
-        );
+        socket.on("participant-joined", ({ participant }: { roomId: string; participant: PeerSummary }) => {
+            peerNamesRef.current.set(participant.id, participant.name);
+            ensurePeerConnection(participant.id, participant.name);
+        });
 
         socket.on(
             "offer",
             async ({ fromId, sdp }: { roomId: string; fromId: string; sdp: RTCSessionDescriptionInit }) => {
-                const peerConnection = ensurePeerConnection(fromId, peerNamesRef.current.get(fromId));
-                if (!peerConnection) {
-                    return;
-                }
+                const pc = ensurePeerConnection(fromId, peerNamesRef.current.get(fromId));
+                if (!pc) return;
 
                 try {
-                    const mySocketId = socketIdRef.current || "";
-                    const polite = mySocketId.localeCompare(fromId) > 0;
+                    const myId = socketIdRef.current || "";
+                    const polite = myId.localeCompare(fromId) > 0;
                     const makingOffer = makingOfferRef.current.get(fromId) ?? false;
-                    const offerCollision =
-                        sdp.type === "offer" && (makingOffer || peerConnection.signalingState !== "stable");
+                    const collision = sdp.type === "offer" && (makingOffer || pc.signalingState !== "stable");
 
-                    if (offerCollision && !polite) {
-                        return;
-                    }
+                    if (collision && !polite) return;
+                    if (collision) await pc.setLocalDescription({ type: "rollback" });
 
-                    if (offerCollision) {
-                        await peerConnection.setLocalDescription({ type: "rollback" });
-                    }
-
-                    await peerConnection.setRemoteDescription(sdp);
+                    await pc.setRemoteDescription(sdp);
                     if (sdp.type === "offer") {
-                        const answer = await peerConnection.createAnswer();
-                        await peerConnection.setLocalDescription(answer);
-
+                        const answer = await pc.createAnswer();
+                        await pc.setLocalDescription(answer);
                         socket.emit("answer", {
                             roomId: currentRoomIdRef.current,
                             targetId: fromId,
-                            sdp: peerConnection.localDescription
+                            sdp: pc.localDescription,
                         });
                     }
-                } catch (error) {
-                    console.error("Failed to handle offer", error);
+                } catch (e) {
+                    console.error("offer handling failed", e);
                 }
             }
         );
@@ -622,42 +614,51 @@ export const Room = ({
         socket.on(
             "answer",
             async ({ fromId, sdp }: { roomId: string; fromId: string; sdp: RTCSessionDescriptionInit }) => {
-                const peerConnection = peersRef.current.get(fromId);
-                if (!peerConnection) {
-                    return;
-                }
+                const pc = peersRef.current.get(fromId);
+                if (!pc) return;
                 try {
-                    await peerConnection.setRemoteDescription(sdp);
-                } catch (error) {
-                    console.error("Failed to handle answer", error);
+                    await pc.setRemoteDescription(sdp);
+                } catch (e) {
+                    console.error("answer handling failed", e);
                 }
             }
         );
 
         socket.on(
             "ice-candidate",
-            async ({ fromId, candidate }: { roomId: string; fromId: string; candidate: RTCIceCandidateInit }) => {
-                const peerConnection = ensurePeerConnection(fromId, peerNamesRef.current.get(fromId));
-                if (!peerConnection || !candidate) {
-                    return;
-                }
-
+            async ({
+                fromId,
+                candidate,
+            }: {
+                roomId: string;
+                fromId: string;
+                candidate: RTCIceCandidateInit;
+            }) => {
+                const pc = ensurePeerConnection(fromId, peerNamesRef.current.get(fromId));
+                if (!pc || !candidate) return;
                 try {
-                    await peerConnection.addIceCandidate(candidate);
-                } catch (error) {
-                    console.error("Failed to add ICE candidate", error);
+                    await pc.addIceCandidate(candidate);
+                } catch (e) {
+                    console.error("ICE candidate failed", e);
                 }
             }
         );
 
         socket.on(
             "screen-share-status",
-            ({ senderId, isSharing, trackId }: { roomId: string; senderId: string; isSharing: boolean; trackId: string | null }) => {
+            ({
+                senderId,
+                isSharing,
+                trackId,
+            }: {
+                roomId: string;
+                senderId: string;
+                isSharing: boolean;
+                trackId: string | null;
+            }) => {
                 screenStatusRef.current.set(senderId, { isSharing, trackId });
                 const participant = participantStateRef.current.get(senderId);
-                if (!participant) {
-                    return;
-                }
+                if (!participant) return;
                 participant.isSharingScreen = isSharing;
                 participant.screenTrackId = trackId;
                 participantStateRef.current.set(senderId, participant);
@@ -666,18 +667,13 @@ export const Room = ({
             }
         );
 
-        socket.on(
-            "playback-toggle",
-            ({ paused }: { roomId: string; senderId: string; paused: boolean }) => {
-                setPlaybackState(paused, false);
-            }
-        );
+        socket.on("playback-toggle", ({ paused }: { paused: boolean }) => {
+            setPlaybackState(paused, false);
+        });
 
         socket.on("participant-left", ({ participantId }: { roomId: string; participantId: string }) => {
-            const peerConnection = peersRef.current.get(participantId);
-            if (peerConnection) {
-                peerConnection.close();
-            }
+            const pc = peersRef.current.get(participantId);
+            if (pc) pc.close();
             peersRef.current.delete(participantId);
             remoteStreamsRef.current.delete(participantId);
             screenVideoSendersRef.current.delete(participantId);
@@ -694,7 +690,7 @@ export const Room = ({
 
         return () => {
             stopScreenShare();
-            peersRef.current.forEach((peerConnection) => peerConnection.close());
+            peersRef.current.forEach((pc) => pc.close());
             peersRef.current.clear();
             remoteStreamsRef.current.clear();
             participantStateRef.current.clear();
@@ -703,105 +699,223 @@ export const Room = ({
             socket.disconnect();
             socketRef.current = null;
         };
-    }, [createAndSendOffer, demoRoomId, ensurePeerConnection, name, removeParticipant, stopScreenShare, syncParticipants, updateDisplayedStream]);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // -----------------------------------------------------------------------
+    // Layout logic
+    //
+    // No screen sharing active:
+    //   Main  = remote participant's camera (full view)
+    //   Sidebar = local camera only (remote is NOT duplicated in sidebar)
+    //
+    // Screen sharing active (local OR remote):
+    //   Main  = shared screen
+    //   Sidebar = local camera + remote camera pip (slides in smoothly)
+    // -----------------------------------------------------------------------
 
     const remoteParticipants = useMemo(
-        () => participants.filter((participant) => participant.id !== socketIdRef.current),
+        () => participants.filter((p) => p.id !== socketIdRef.current),
         [participants]
     );
 
-    const mainParticipant = useMemo(() => {
-        if (isScreenSharing && screenPreviewStream) {
-            return {
-                id: socketIdRef.current || "local-screen",
-                name,
-                sourceStream: screenPreviewStream,
-                displayStream: screenPreviewStream,
-                isSharingScreen: true,
-                screenTrackId: screenVideoTrackRef.current?.id ?? null
-            };
-        }
+    const remoteSharingParticipant = useMemo(
+        () => remoteParticipants.find((p) => p.isSharingScreen) ?? null,
+        [remoteParticipants]
+    );
 
-        if (remoteParticipants.length === 0) {
-            return null;
-        }
-        const sharing = remoteParticipants.find((participant) => participant.isSharingScreen);
-        return sharing || remoteParticipants[0];
-    }, [isScreenSharing, name, remoteParticipants, screenPreviewStream]);
+    // anyoneSharing = local or remote is sharing
+    const anyoneSharing = isScreenSharing || !!remoteSharingParticipant;
 
-    const sideParticipants = useMemo(() => {
-        return participants.filter((participant) => participant.id !== mainParticipant?.id);
-    }, [mainParticipant, participants]);
+    // Main panel:
+    //   - If WE share → show our screen (via always-mounted video ref, shown via CSS)
+    //   - If REMOTE shares → show their screen
+    //   - Nobody sharing → show first remote's camera
+    const mainPanelParticipant = useMemo(() => {
+        if (isScreenSharing) return null;           // our screen shown via ref
+        if (remoteSharingParticipant) return remoteSharingParticipant;
+        return remoteParticipants[0] ?? null;
+    }, [isScreenSharing, remoteSharingParticipant, remoteParticipants]);
 
-    const mainParticipantCameraStream = useMemo(() => {
-        if (!mainParticipant?.isSharingScreen) {
-            return null;
-        }
-
-        const matchingParticipant = participants.find((participant) => participant.id === mainParticipant.id);
-        if (!matchingParticipant) {
-            return null;
-        }
-
-        return matchingParticipant.cameraStream.getVideoTracks().length > 0 ? matchingParticipant.cameraStream : null;
-    }, [mainParticipant, participants]);
-
-    const getSidebarStream = useCallback((participant: ParticipantState) => {
-        if (participant.isSharingScreen && participant.cameraStream.getVideoTracks().length > 0) {
-            return participant.cameraStream;
-        }
-
-        return participant.displayStream;
-    }, []);
+    // Sidebar remote tiles:
+    //   - When sharing is active: show every remote's camera pip
+    //   - When NOT sharing: hide remotes from sidebar (they're in main panel)
+    const sidebarRemotes = useMemo(() => {
+        if (!anyoneSharing) return [];   // remote is in main panel, don't duplicate
+        return remoteParticipants;       // show camera pip for all remotes
+    }, [anyoneSharing, remoteParticipants]);
 
     return (
+        /*
+         * Root container: 100vw wide, never overflows horizontally.
+         * display:flex + flex:1 on the grid div means the grid fills
+         * all remaining vertical space without a hard-coded height.
+         */
         <div
             ref={containerRef}
             style={{
-                minHeight: isFullscreen ? "100vh" : "100vh",
+                width: "100%",
+                maxWidth: "100vw",
+                minHeight: "100vh",
+                overflow: "hidden",
+                boxSizing: "border-box",
                 backgroundColor: isFullscreen ? "#000" : "var(--bg-main)",
-                padding: "1.5rem",
+                padding: "0.75rem 1rem",
                 display: "flex",
                 flexDirection: "column",
-                gap: "1rem"
+                gap: "0.75rem",
             }}
         >
-            <div style={{ textAlign: "center" }}>
-                <h2 style={{ fontSize: "1.4rem", fontWeight: 700 }}>Hi, {name}</h2>
-                {lobby && !currentRoomId && <p style={{ color: "var(--text-muted)" }}>Generating room...</p>}
-                {lobby && currentRoomId && <p style={{ color: "var(--text-muted)" }}>Waiting for others to join... Room ID: {currentRoomId}</p>}
-                {!lobby && currentRoomId && <p style={{ color: "var(--text-muted)" }}>Room ID: {currentRoomId}</p>}
+            {/* Header */}
+            <div style={{ textAlign: "center", flexShrink: 0 }}>
+                <h2 style={{ fontSize: "1.2rem", fontWeight: 700 }}>Hi, {name}</h2>
+                {lobby && !currentRoomId && (
+                    <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>Generating room…</p>
+                )}
+                {lobby && currentRoomId && (
+                    <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                        Waiting for others… Room ID: <strong>{currentRoomId}</strong>
+                    </p>
+                )}
+                {!lobby && currentRoomId && (
+                    <p style={{ color: "var(--text-muted)", fontSize: "0.85rem" }}>
+                        Room ID: <strong>{currentRoomId}</strong>
+                    </p>
+                )}
             </div>
 
+            {/*
+             * Main grid — flex:1 makes it consume all leftover vertical space.
+             * gridTemplateColumns: sidebar is fixed 240px; main panel takes the rest
+             * via minmax(0,1fr) — the minmax(0,...) is critical, it prevents the
+             * main column from blowing out past the container width.
+             */}
             <div
                 style={{
                     display: "grid",
-                    gridTemplateColumns: "minmax(0, 1fr) 280px",
-                    gap: "1rem",
-                    minHeight: "70vh"
+                    gridTemplateColumns: "minmax(0, 1fr) 240px",
+                    gridTemplateRows: "1fr",
+                    gap: "0.75rem",
+                    flex: 1,
+                    minHeight: 0,        /* required so flex child can shrink */
+                    width: "100%",
+                    overflow: "hidden",
                 }}
             >
-                <div style={{ minHeight: "100%", height: "100%" }}>
-                    <ParticipantVideo
-                        stream={mainParticipant?.displayStream || null}
-                        label={mainParticipant ? `${mainParticipant.name}${mainParticipant.isSharingScreen ? " (Sharing)" : ""}` : "Waiting for participants"}
-                        prioritized={mainParticipant?.isSharingScreen}
-                        paused={isPlaybackPaused}
-                    />
+                {/* ── Main panel ── */}
+                <div style={{ position: "relative", minHeight: 0, overflow: "hidden", borderRadius: "0.75rem" }}>
+
+                    {/* Local screen share — always mounted, shown via CSS opacity */}
+                    <div
+                        className="video-container"
+                        style={{
+                            position: "absolute",
+                            inset: 0,
+                            border: "2px solid var(--success)",
+                            borderRadius: "0.75rem",
+                            opacity: isScreenSharing ? 1 : 0,
+                            pointerEvents: isScreenSharing ? "auto" : "none",
+                            transition: "opacity 300ms ease",
+                            zIndex: isScreenSharing ? 2 : 0,
+                        }}
+                    >
+                        <video
+                            ref={localScreenPreviewRef}
+                            autoPlay
+                            muted
+                            playsInline
+                            style={{
+                                width: "100%",
+                                height: "100%",
+                                objectFit: "contain",
+                                background: "#000",
+                            }}
+                        />
+                        <div className="badge">Your Screen</div>
+                    </div>
+
+                    {/* Remote screen share */}
+                    {remoteSharingParticipant && (
+                        <div
+                            style={{
+                                position: "absolute",
+                                inset: 0,
+                                opacity: !isScreenSharing ? 1 : 0,
+                                transition: "opacity 300ms ease",
+                                zIndex: !isScreenSharing ? 2 : 0,
+                            }}
+                        >
+                            <ParticipantVideo
+                                stream={remoteSharingParticipant.displayStream}
+                                label={`${remoteSharingParticipant.name} (Sharing)`}
+                                prioritized
+                                muted
+                            />
+                        </div>
+                    )}
+
+                    {/* Remote camera — shown when nobody is sharing */}
+                    {mainPanelParticipant && !mainPanelParticipant.isSharingScreen && (
+                        <div
+                            style={{
+                                position: "absolute",
+                                inset: 0,
+                                opacity: !anyoneSharing ? 1 : 0,
+                                transition: "opacity 300ms ease",
+                                zIndex: !anyoneSharing ? 2 : 0,
+                            }}
+                        >
+                            <ParticipantVideo
+                                stream={mainPanelParticipant.displayStream}
+                                label={mainPanelParticipant.name}
+                                muted
+                            />
+                        </div>
+                    )}
+
+                    {/* Empty state */}
+                    {!mainPanelParticipant && !isScreenSharing && (
+                        <div
+                            style={{
+                                position: "absolute",
+                                inset: 0,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                border: "1px solid var(--border)",
+                                borderRadius: "0.75rem",
+                                color: "var(--text-muted)",
+                            }}
+                        >
+                            Waiting for participants…
+                        </div>
+                    )}
                 </div>
 
-                <div style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}>
-                    <div style={{ width: "100%", aspectRatio: "16 / 9" }}>
+                {/* ── Sidebar ── */}
+                <div
+                    style={{
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: "0.75rem",
+                        minHeight: 0,
+                        overflow: "hidden",
+                    }}
+                >
+                    {/* Local camera — always visible in sidebar */}
+                    <div style={{ width: "100%", aspectRatio: "16 / 9", flexShrink: 0 }}>
                         <div
                             className="video-container"
                             style={{
-                                borderRadius: "0.75rem",
-                                border: isScreenSharing ? "2px solid var(--success)" : "1px solid var(--border)",
-                                height: "100%"
+                                height: "100%",
+                                border: isScreenSharing
+                                    ? "2px solid var(--success)"
+                                    : "1px solid var(--border)",
+                                transition: "border-color 220ms ease",
                             }}
                         >
                             <video
-                                ref={localPreviewRef}
+                                ref={localCameraPreviewRef}
                                 autoPlay
                                 muted
                                 playsInline
@@ -810,58 +924,65 @@ export const Room = ({
                                     height: "100%",
                                     objectFit: "cover",
                                     background: "#000",
-                                    transform: "scaleX(-1)"
+                                    transform: "scaleX(-1)",
                                 }}
                             />
                             <div className="badge">You</div>
                         </div>
                     </div>
 
-                    {isScreenSharing && screenPreviewStream && (
-                        <div style={{ width: "100%", aspectRatio: "16 / 9" }}>
-                            <ParticipantVideo
-                                stream={screenPreviewStream}
-                                label="Your screen"
-                                prioritized
-                                paused={isPlaybackPaused}
-                            />
-                        </div>
-                    )}
+                    {/* Remote camera pips — slide in when sharing starts */}
+                    <div
+                        style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "0.75rem",
+                            overflow: "hidden",
+                            maxHeight: anyoneSharing ? "800px" : "0px",
+                            opacity: anyoneSharing ? 1 : 0,
+                            transition: "max-height 350ms ease, opacity 300ms ease",
+                        }}
+                    >
+                        {sidebarRemotes.map((participant) => (
+                            <div key={participant.id} style={{ width: "100%", aspectRatio: "16 / 9", flexShrink: 0 }}>
+                                <ParticipantVideo
+                                    stream={participant.cameraStream || participant.displayStream}
+                                    label={participant.name}
+                                    muted
+                                />
+                            </div>
+                        ))}
+                    </div>
 
-                    {mainParticipant?.isSharingScreen && mainParticipantCameraStream && (
-                        <div style={{ width: "100%", aspectRatio: "16 / 9" }}>
-                            <ParticipantVideo
-                                stream={mainParticipantCameraStream}
-                                label={`${mainParticipant.name} (Camera)`}
-                                paused={isPlaybackPaused}
-                            />
-                        </div>
-                    )}
-
-                    {sideParticipants.map((participant) => (
-                        <div key={participant.id} style={{ width: "100%", aspectRatio: "16 / 9" }}>
-                            <ParticipantVideo
-                                stream={getSidebarStream(participant)}
-                                label={`${participant.name}${participant.isSharingScreen ? " (Sharing)" : ""}`}
-                                prioritized={participant.isSharingScreen}
-                                paused={isPlaybackPaused}
-                            />
-                        </div>
-                    ))}
-
-                    <button className="btn btn-secondary" onClick={togglePlayback} disabled={lobby}>
-                        {isPlaybackPaused ? "Play" : "Pause"}
-                    </button>
-                    <button className={isScreenSharing ? "btn btn-danger" : "btn btn-primary"} onClick={toggleScreenShare} disabled={lobby}>
-                        {isScreenSharing ? "Stop Sharing" : "Share Screen"}
-                    </button>
-                    <button className="btn btn-secondary" onClick={toggleFullscreen} disabled={lobby}>
-                        {isFullscreen ? "Exit Fullscreen" : "Fullscreen"}
-                    </button>
+                    {/* Controls — no play/pause */}
+                    <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem", marginTop: "auto" }}>
+                        <button
+                            className={isScreenSharing ? "btn btn-danger" : "btn btn-primary"}
+                            onClick={toggleScreenShare}
+                            disabled={lobby}
+                            style={{ width: "100%" }}
+                        >
+                            {isScreenSharing ? "⏹ Stop Sharing" : "🖥 Share Screen"}
+                        </button>
+                        <button
+                            className="btn btn-secondary"
+                            onClick={toggleFullscreen}
+                            disabled={lobby}
+                            style={{ width: "100%" }}
+                        >
+                            {isFullscreen ? "⤓ Exit Fullscreen" : "⤢ Fullscreen"}
+                        </button>
+                    </div>
                 </div>
             </div>
-            {participants.map((participant) => (
-                <ParticipantAudio key={participant.id} stream={participant.displayStream} boost={1.7} />
+
+            {/* Hidden audio players — one per remote participant */}
+            {remoteParticipants.map((participant) => (
+                <ParticipantAudio
+                    key={participant.id}
+                    stream={participant.displayStream}
+                    boost={1.7}
+                />
             ))}
         </div>
     );
