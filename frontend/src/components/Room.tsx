@@ -272,20 +272,27 @@ export const Room = ({
 
             const audioContext = new AudioContext();
             const destination = audioContext.createMediaStreamDestination();
+            const compressor = audioContext.createDynamicsCompressor();
+            compressor.threshold.value = -24;
+            compressor.knee.value = 18;
+            compressor.ratio.value = 4;
+            compressor.attack.value = 0.003;
+            compressor.release.value = 0.25;
+            compressor.connect(destination);
 
             if (micTrack) {
                 const micSource = audioContext.createMediaStreamSource(new MediaStream([micTrack]));
                 const micGain = audioContext.createGain();
-                micGain.gain.value = 1;
+                micGain.gain.value = 1.6;
                 micSource.connect(micGain);
-                micGain.connect(destination);
+                micGain.connect(compressor);
             }
 
             const screenSource = audioContext.createMediaStreamSource(new MediaStream([screenAudioTrack]));
             const screenGain = audioContext.createGain();
-            screenGain.gain.value = 1;
+            screenGain.gain.value = 0.7;
             screenSource.connect(screenGain);
-            screenGain.connect(destination);
+            screenGain.connect(compressor);
 
             audioContext.resume().catch(() => undefined);
 

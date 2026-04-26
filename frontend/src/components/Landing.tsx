@@ -12,7 +12,11 @@ export const Landing = () => {
         try {
             const stream = await window.navigator.mediaDevices.getUserMedia({
                 video: true,
-                audio: true
+                audio: {
+                    echoCancellation: false,
+                    noiseSuppression: false,
+                    autoGainControl: false,
+                }
             })
             const audioTrack = stream.getAudioTracks()[0]
             const videoTrack = stream.getVideoTracks()[0]
