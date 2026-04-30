@@ -555,6 +555,12 @@ export const Room = ({
             else socket.emit("create-room", { name });
         });
 
+        socket.on("disconnect", () => {
+            // Our socket disconnected - this might be due to network issues
+            // Try to reconnect
+            console.log("Socket disconnected, attempting to reconnect...");
+        });
+
         socket.on("room-created", ({ roomId }: { roomId: string }) => {
             setCurrentRoomId(roomId);
             currentRoomIdRef.current = roomId;
@@ -578,14 +584,16 @@ export const Room = ({
             peerNamesRef.current.set(participant.id, participant.name);
             const pc = ensurePeerConnection(participant.id, participant.name);
             
-            // If we are screen sharing, add our screen track to the new peer BEFORE creating offer
+            // If we are screen sharing, add our screen track to the new peer
             if (isScreenSharing && screenVideoTrackRef.current && screenStreamRef.current) {
-                const sender = pc.addTrack(screenVideoTrackRef.current, screenStreamRef.current);
-                screenVideoSendersRef.current.set(participant.id, sender);
-            }
-            
-            // Also send our screen share status so new peer knows we're sharing
-            if (isScreenSharing && screenVideoTrackRef.current) {
+                // Check if we already have a sender for this peer
+                let sender = screenVideoSendersRef.current.get(participant.id);
+                if (!sender) {
+                    sender = pc.addTrack(screenVideoTrackRef.current, screenStreamRef.current);
+                    screenVideoSendersRef.current.set(participant.id, sender);
+                }
+                
+                // Send screen share status to new peer
                 socket.emit("screen-share-status", { 
                     roomId: currentRoomIdRef.current, 
                     isSharing: true, 
@@ -593,14 +601,21 @@ export const Room = ({
                 });
             }
             
-            // Now create and send the offer - this will include screen track if we added it
+            // Create and send the offer
             createAndSendOffer(participant.id);
             
-            // If we're still screen sharing, trigger another offer to ensure screen track is sent
+            // If we're screen sharing, ensure the screen track is sent by triggering renegotiation
             if (isScreenSharing && screenVideoTrackRef.current) {
+                // Delay to allow connection to stabilize
                 setTimeout(() => {
+                    // Force track to be sent by replacing with same track
+                    const sender = screenVideoSendersRef.current.get(participant.id);
+                    if (sender && screenVideoTrackRef.current) {
+                        sender.replaceTrack(screenVideoTrackRef.current).catch(() => {});
+                    }
+                    // Create new offer to include screen track
                     createAndSendOffer(participant.id);
-                }, 500);
+                }, 1000);
             }
         });
 
@@ -902,6 +917,7 @@ export const Room = ({
                         }}>
                             {sharingParticipant.isLocal ? (
                                 <video
+                                    key={isScreenSharing ? "screen-share-active" : "no-share"}
                                     ref={localScreenPreviewRef}
                                     autoPlay
                                     muted
