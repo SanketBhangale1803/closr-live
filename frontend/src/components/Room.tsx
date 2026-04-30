@@ -576,8 +576,32 @@ export const Room = ({
 
         socket.on("participant-joined", ({ participant }: { roomId: string; participant: PeerSummary }) => {
             peerNamesRef.current.set(participant.id, participant.name);
-            ensurePeerConnection(participant.id, participant.name);
+            const pc = ensurePeerConnection(participant.id, participant.name);
+            
+            // If we are screen sharing, add our screen track to the new peer BEFORE creating offer
+            if (isScreenSharing && screenVideoTrackRef.current && screenStreamRef.current) {
+                const sender = pc.addTrack(screenVideoTrackRef.current, screenStreamRef.current);
+                screenVideoSendersRef.current.set(participant.id, sender);
+            }
+            
+            // Also send our screen share status so new peer knows we're sharing
+            if (isScreenSharing && screenVideoTrackRef.current) {
+                socket.emit("screen-share-status", { 
+                    roomId: currentRoomIdRef.current, 
+                    isSharing: true, 
+                    trackId: screenVideoTrackRef.current.id 
+                });
+            }
+            
+            // Now create and send the offer - this will include screen track if we added it
             createAndSendOffer(participant.id);
+            
+            // If we're still screen sharing, trigger another offer to ensure screen track is sent
+            if (isScreenSharing && screenVideoTrackRef.current) {
+                setTimeout(() => {
+                    createAndSendOffer(participant.id);
+                }, 500);
+            }
         });
 
         socket.on(
@@ -866,8 +890,8 @@ export const Room = ({
                     borderRadius: "0.75rem",
                     background: "#1e293b",
                 }}>
-                    {/* Screen share view */}
-                    {sharingParticipant && (
+                    {/* Screen share view - show when someone is sharing */}
+                    {sharingParticipant ? (
                         <div style={{
                             flex: 1,
                             position: "relative",
@@ -900,10 +924,8 @@ export const Room = ({
                                 {sharingParticipant.isLocal ? "Your Screen" : `${sharingParticipant.name}'s Screen`}
                             </div>
                         </div>
-                    )}
-
-                    {/* Regular grid when no sharing */}
-                    {!sharingParticipant && (
+                    ) : (
+                        /* Regular grid when no sharing - show all in main area */
                         <div style={{
                             flex: 1,
                             display: "grid",
@@ -930,52 +952,35 @@ export const Room = ({
                     )}
                 </div>
 
-                {/* Right panel: All participants' videos (docked) */}
-                <div style={{
-                    width: "240px",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: "0.5rem",
-                    overflow: "hidden",
-                    flexShrink: 0,
-                }}>
+                {/* Right panel: Only show when someone is sharing */}
+                {sharingParticipant && (
                     <div style={{
-                        fontSize: "0.75rem",
-                        color: "#94a3b8",
-                        padding: "0.25rem 0",
-                        textAlign: "center",
-                        flexShrink: 0,
-                    }}>
-                        Participants ({allTiles.length})
-                    </div>
-                    <div style={{
-                        flex: 1,
+                        width: "240px",
                         display: "flex",
                         flexDirection: "column",
                         gap: "0.5rem",
-                        overflow: "auto",
-                        paddingRight: "2px",
+                        overflow: "hidden",
+                        flexShrink: 0,
                     }}>
-                        {/* Local video - show camera only, not screen share */}
                         <div style={{
-                            width: "100%",
-                            aspectRatio: "16/9",
-                            borderRadius: "0.5rem",
-                            overflow: "hidden",
+                            fontSize: "0.75rem",
+                            color: "#94a3b8",
+                            padding: "0.25rem 0",
+                            textAlign: "center",
                             flexShrink: 0,
                         }}>
-                            <ParticipantVideo
-                                stream={new MediaStream(localVideoTrack ? [localVideoTrack] : [])}
-                                label={name}
-                                mirrored
-                                muted
-                                isLocal
-                            />
+                            Participants ({allTiles.length})
                         </div>
-
-                        {/* Remote videos - show camera stream for each participant */}
-                        {remoteParticipants.map((p) => (
-                            <div key={p.id} style={{
+                        <div style={{
+                            flex: 1,
+                            display: "flex",
+                            flexDirection: "column",
+                            gap: "0.5rem",
+                            overflow: "auto",
+                            paddingRight: "2px",
+                        }}>
+                            {/* Local video - show camera */}
+                            <div style={{
                                 width: "100%",
                                 aspectRatio: "16/9",
                                 borderRadius: "0.5rem",
@@ -983,14 +988,33 @@ export const Room = ({
                                 flexShrink: 0,
                             }}>
                                 <ParticipantVideo
-                                    stream={p.cameraStream}
-                                    label={p.name}
+                                    stream={new MediaStream(localVideoTrack ? [localVideoTrack] : [])}
+                                    label={name}
+                                    mirrored
                                     muted
+                                    isLocal
                                 />
                             </div>
-                        ))}
+
+                            {/* Remote videos - show camera for each participant */}
+                            {remoteParticipants.map((p) => (
+                                <div key={p.id} style={{
+                                    width: "100%",
+                                    aspectRatio: "16/9",
+                                    borderRadius: "0.5rem",
+                                    overflow: "hidden",
+                                    flexShrink: 0,
+                                }}>
+                                    <ParticipantVideo
+                                        stream={p.cameraStream}
+                                        label={p.name}
+                                        muted
+                                    />
+                                </div>
+                            ))}
+                        </div>
                     </div>
-                </div>
+                )}
             </div>
 
             {/* Control bar - outside main content */}
