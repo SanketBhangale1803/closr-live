@@ -4,8 +4,6 @@ This project is built on top of https://github.com/hkirat/omegle with a cleaner 
 
 **Closr** is a small-group **video calling** app aimed at talking with friends: join a room, see everyone in a mesh WebRTC layout, keep audio and video **peer-to-peer** when the network allows. Signaling runs over **Socket.IO**; media does not transit through the server.
 
-It inherits the room and signaling patterns from [hkirat’s Omegle-style stack](https://github.com/hkirat/omegle) and focuses on straightforward calls rather than pitching extra “watch together” or content-sharing workflows.
-
 ---
 
 ## Architecture overview
