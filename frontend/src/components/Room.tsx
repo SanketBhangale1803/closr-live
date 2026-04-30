@@ -481,12 +481,13 @@ export const Room = ({
             screenAudioTrackRef.current = audioTrack;
             syncOutboundAudioTrack(buildOutboundAudioTrack(localAudioTrack, audioTrack));
 
-            const previewStream = new MediaStream([videoTrack]);
-            setScreenPreviewStream(previewStream);
+            // Use the actual screen stream, not a copy
+            setScreenPreviewStream(stream);
             setIsScreenSharing(true);
 
+            // Set the video element source immediately
             if (localScreenPreviewRef.current) {
-                localScreenPreviewRef.current.srcObject = previewStream;
+                localScreenPreviewRef.current.srcObject = stream;
                 localScreenPreviewRef.current.play().catch(() => undefined);
             }
 
@@ -916,18 +917,21 @@ export const Room = ({
                             background: "#000",
                         }}>
                             {sharingParticipant.isLocal ? (
-                                <video
-                                    key={isScreenSharing ? "screen-share-active" : "no-share"}
-                                    ref={localScreenPreviewRef}
-                                    autoPlay
-                                    muted
-                                    playsInline
-                                    style={{
-                                        width: "100%",
-                                        height: "100%",
-                                        objectFit: "contain",
-                                    }}
-                                />
+                                screenStreamRef.current ? (
+                                    <video
+                                        ref={localScreenPreviewRef}
+                                        autoPlay
+                                        muted
+                                        playsInline
+                                        style={{
+                                            width: "100%",
+                                            height: "100%",
+                                            objectFit: "contain",
+                                        }}
+                                    />
+                                ) : (
+                                    <div style={{ color: "#fff" }}>Starting screen share...</div>
+                                )
                             ) : (
                                 <ParticipantVideo
                                     stream={remoteParticipants.find(p => p.id === sharingParticipant.id)?.displayStream || null}
