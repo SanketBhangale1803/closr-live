@@ -956,7 +956,7 @@ export const Room = ({
                         overflow: "auto",
                         paddingRight: "2px",
                     }}>
-                        {/* Local video */}
+                        {/* Local video - show camera only, not screen share */}
                         <div style={{
                             width: "100%",
                             aspectRatio: "16/9",
@@ -965,7 +965,7 @@ export const Room = ({
                             flexShrink: 0,
                         }}>
                             <ParticipantVideo
-                                stream={localStreamRef.current}
+                                stream={new MediaStream(localVideoTrack ? [localVideoTrack] : [])}
                                 label={name}
                                 mirrored
                                 muted
@@ -973,7 +973,7 @@ export const Room = ({
                             />
                         </div>
 
-                        {/* Remote videos */}
+                        {/* Remote videos - show camera stream for each participant */}
                         {remoteParticipants.map((p) => (
                             <div key={p.id} style={{
                                 width: "100%",
@@ -983,7 +983,7 @@ export const Room = ({
                                 flexShrink: 0,
                             }}>
                                 <ParticipantVideo
-                                    stream={p.displayStream}
+                                    stream={p.cameraStream}
                                     label={p.name}
                                     muted
                                 />
@@ -998,8 +998,8 @@ export const Room = ({
                 display: "flex",
                 justifyContent: "center",
                 alignItems: "center",
-                gap: "0.75rem",
-                padding: "0.75rem",
+                gap: "1rem",
+                padding: "0.75rem 1.5rem",
                 background: "rgba(15, 23, 42, 0.95)",
                 borderTop: "1px solid rgba(255,255,255,0.08)",
                 flexShrink: 0,
@@ -1007,106 +1007,101 @@ export const Room = ({
                 <button
                     onClick={handleToggleMic}
                     style={{
-                        width: "52px",
-                        height: "52px",
-                        borderRadius: "50%",
+                        padding: "0.5rem 1rem",
+                        borderRadius: "0.5rem",
                         border: "none",
                         cursor: "pointer",
                         display: "flex",
                         alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: "1.35rem",
+                        gap: "0.5rem",
+                        fontSize: "0.875rem",
+                        fontWeight: 500,
                         background: micEnabled ? "rgba(255,255,255,0.12)" : "var(--danger)",
                         color: "white",
                         transition: "all 0.2s",
                     }}
-                    title={micEnabled ? "Mute" : "Unmute"}
                 >
-                    {micEnabled ? "🎤" : "🔇"}
+                    <span>{micEnabled ? "Mic On" : "Mic Off"}</span>
                 </button>
 
                 <button
                     onClick={handleToggleCam}
                     style={{
-                        width: "52px",
-                        height: "52px",
-                        borderRadius: "50%",
+                        padding: "0.5rem 1rem",
+                        borderRadius: "0.5rem",
                         border: "none",
                         cursor: "pointer",
                         display: "flex",
                         alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: "1.35rem",
+                        gap: "0.5rem",
+                        fontSize: "0.875rem",
+                        fontWeight: 500,
                         background: camEnabled ? "rgba(255,255,255,0.12)" : "var(--danger)",
                         color: "white",
                         transition: "all 0.2s",
                     }}
-                    title={camEnabled ? "Stop camera" : "Start camera"}
                 >
-                    {camEnabled ? "📹" : "📷"}
+                    <span>{camEnabled ? "Camera On" : "Camera Off"}</span>
                 </button>
 
                 <button
                     onClick={toggleScreenShare}
                     style={{
-                        width: "52px",
-                        height: "52px",
-                        borderRadius: "50%",
+                        padding: "0.5rem 1rem",
+                        borderRadius: "0.5rem",
                         border: "none",
                         cursor: "pointer",
                         display: "flex",
                         alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: "1.35rem",
+                        gap: "0.5rem",
+                        fontSize: "0.875rem",
+                        fontWeight: 500,
                         background: isScreenSharing ? "var(--success)" : "rgba(255,255,255,0.12)",
                         color: "white",
                         transition: "all 0.2s",
                     }}
-                    title={isScreenSharing ? "Stop sharing" : "Share screen"}
                 >
-                    🖥
+                    <span>{isScreenSharing ? "Stop Share" : "Share Screen"}</span>
                 </button>
 
                 <button
                     onClick={toggleFullscreen}
                     style={{
-                        width: "52px",
-                        height: "52px",
-                        borderRadius: "50%",
+                        padding: "0.5rem 1rem",
+                        borderRadius: "0.5rem",
                         border: "none",
                         cursor: "pointer",
                         display: "flex",
                         alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: "1.35rem",
+                        gap: "0.5rem",
+                        fontSize: "0.875rem",
+                        fontWeight: 500,
                         background: "rgba(255,255,255,0.12)",
                         color: "white",
                         transition: "all 0.2s",
                     }}
-                    title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
                 >
-                    {isFullscreen ? "⤓" : "⤢"}
+                    <span>{isFullscreen ? "Exit Fullscreen" : "Fullscreen"}</span>
                 </button>
 
                 <button
                     onClick={handleLeave}
                     style={{
-                        width: "52px",
-                        height: "52px",
-                        borderRadius: "50%",
+                        padding: "0.5rem 1rem",
+                        borderRadius: "0.5rem",
                         border: "none",
                         cursor: "pointer",
                         display: "flex",
                         alignItems: "center",
-                        justifyContent: "center",
-                        fontSize: "1.35rem",
+                        gap: "0.5rem",
+                        fontSize: "0.875rem",
+                        fontWeight: 500,
                         background: "var(--danger)",
                         color: "white",
                         transition: "all 0.2s",
                     }}
-                    title="Leave"
                 >
-                    📞
+                    <span>Leave</span>
                 </button>
             </div>
 
