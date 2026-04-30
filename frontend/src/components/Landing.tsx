@@ -87,20 +87,20 @@ export const Landing = () => {
                     background: "var(--bg-card)",
                 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: "0.75rem" }}>
-                        <div style={{
-                            width: "40px",
-                            height: "40px",
-                            borderRadius: "12px",
-                            background: "linear-gradient(135deg, var(--primary), #7c3aed)",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            color: "white",
-                            fontSize: "1.25rem",
-                        }}>
-                            ▶
-                        </div>
-                        <span style={{ fontWeight: 700, fontSize: "1.25rem" }}>Closr</span>
+                        <img
+                            src="/logo.png"
+                            alt=""
+                            width={72}
+                            height={72}
+                            style={{
+                                width: "150px",
+                                height: "150px",
+                                borderRadius: "24px",
+                                objectFit: "contain",
+                                display: "block",
+                            }}
+                        />
+                        <span style={{ fontWeight: 700, fontSize: "1.5rem" }}>Closr</span>
                     </div>
                 </header>
 
