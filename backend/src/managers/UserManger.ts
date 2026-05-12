@@ -80,5 +80,11 @@ export class UserManager {
                 this.roomManager.onScreenShareStatus(roomId, socket.id, isSharing, trackId ?? null);
             }
         );
+
+        // Explicit leave so others' tiles disappear immediately instead of after
+        // a Socket.IO ping timeout.
+        socket.on("leave-room", () => {
+            this.roomManager.removeUser(socket.id);
+        });
     }
 }

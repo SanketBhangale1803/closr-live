@@ -143,6 +143,7 @@ const ParticipantVideo = ({
     mirrored,
     muted = false,
     isLocal = false,
+    fitMode = "cover",
 }: {
     stream: MediaStream | null;
     label: string;
@@ -150,6 +151,8 @@ const ParticipantVideo = ({
     mirrored?: boolean;
     muted?: boolean;
     isLocal?: boolean;
+    /** "cover" fills the tile (good for cameras); "contain" preserves aspect (good for screen-share). */
+    fitMode?: "cover" | "contain";
 }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const [isVideoReady, setIsVideoReady] = useState(false);
@@ -174,8 +177,13 @@ const ParticipantVideo = ({
         <div
             className="video-tile"
             style={{
-                border: prioritized ? "2px solid var(--success)" : isLocal ? "2px solid var(--primary)" : "1px solid var(--border)",
+                border: prioritized
+                    ? "2px solid var(--success)"
+                    : isLocal
+                        ? "2px solid var(--primary)"
+                        : "1px solid var(--border)",
                 transition: "border-color 220ms ease, box-shadow 220ms ease",
+                background: fitMode === "contain" ? "#000" : undefined,
             }}
         >
             {!hasVideo && (
@@ -194,7 +202,7 @@ const ParticipantVideo = ({
                 style={{
                     width: "100%",
                     height: "100%",
-                    objectFit: "cover",
+                    objectFit: fitMode,
                     transform: mirrored ? "scaleX(-1)" : "none",
                     opacity: isVideoReady && hasVideo ? 1 : 0,
                     transition: "opacity 220ms ease",
@@ -294,6 +302,8 @@ export const Room = ({
     const participantStateRef = useRef<Map<string, ParticipantState>>(new Map());
     const screenStatusRef = useRef<Map<string, { isSharing: boolean; trackId: string | null }>>(new Map());
     const makingOfferRef = useRef<Map<string, boolean>>(new Map());
+    /** Timers that drop a participant if their peer connection stays unhealthy too long. */
+    const peerDeathTimersRef = useRef<Map<string, number>>(new Map());
 
     const localStreamRef = useRef<MediaStream>(new MediaStream());
     const screenStreamRef = useRef<MediaStream | null>(null);
@@ -346,11 +356,19 @@ export const Room = ({
     const upsertParticipantStream = useCallback(
         (participantId: string, stream: MediaStream, participantName?: string) => {
             const existing = participantStateRef.current.get(participantId);
+            // Prefer the freshly-supplied name, otherwise our most recent peer-name lookup,
+            // and finally fall back to the existing tile's name so we don't regress to "Guest".
+            const resolvedName =
+                participantName ||
+                peerNamesRef.current.get(participantId) ||
+                existing?.name ||
+                "Guest";
+
             const nextState: ParticipantState = existing
-                ? { ...existing, sourceStream: stream }
+                ? { ...existing, sourceStream: stream, name: resolvedName }
                 : {
                       id: participantId,
-                      name: participantName || peerNamesRef.current.get(participantId) || "Guest",
+                      name: resolvedName,
                       sourceStream: stream,
                       displayStream: new MediaStream(),
                       cameraStream: new MediaStream(),
@@ -579,18 +597,48 @@ export const Room = ({
 
             pc.onnegotiationneeded = () => createAndSendOffer(peerId);
 
+            const dropPeer = () => {
+                const timerId = peerDeathTimersRef.current.get(peerId);
+                if (timerId) window.clearTimeout(timerId);
+                peerDeathTimersRef.current.delete(peerId);
+
+                try { pc.close(); } catch { /* already closed */ }
+                peersRef.current.delete(peerId);
+                remoteStreamsRef.current.delete(peerId);
+                screenVideoSendersRef.current.delete(peerId);
+                cameraSendersRef.current.delete(peerId);
+                audioSendersRef.current.delete(peerId);
+                makingOfferRef.current.delete(peerId);
+                peerNamesRef.current.delete(peerId);
+                screenStatusRef.current.delete(peerId);
+                removeParticipant(peerId);
+            };
+
             pc.onconnectionstatechange = () => {
                 const state = pc.connectionState;
-                // Do not tear down on "disconnected" — it is often transient; ICE may recover.
+                const existingTimer = peerDeathTimersRef.current.get(peerId);
+
                 if (state === "failed" || state === "closed") {
-                    pc.close();
-                    peersRef.current.delete(peerId);
-                    remoteStreamsRef.current.delete(peerId);
-                    screenVideoSendersRef.current.delete(peerId);
-                    cameraSendersRef.current.delete(peerId);
-                    audioSendersRef.current.delete(peerId);
-                    makingOfferRef.current.delete(peerId);
-                    removeParticipant(peerId);
+                    dropPeer();
+                    return;
+                }
+
+                if (state === "disconnected") {
+                    // ICE may recover within a few seconds; if it doesn't, reap the tile
+                    // so callers don't see ghost participants after someone leaves.
+                    if (!existingTimer) {
+                        const t = window.setTimeout(() => {
+                            if (pc.connectionState === "disconnected") dropPeer();
+                        }, 6000);
+                        peerDeathTimersRef.current.set(peerId, t);
+                    }
+                    return;
+                }
+
+                // Connection healthy again — cancel any pending reap.
+                if (existingTimer) {
+                    window.clearTimeout(existingTimer);
+                    peerDeathTimersRef.current.delete(peerId);
                 }
             };
 
@@ -809,6 +857,14 @@ export const Room = ({
             peerNamesRef.current.set(participant.id, participant.name);
             ensurePeerConnection(participant.id, participant.name);
 
+            // If we already created a tile (via early ontrack) with a placeholder name,
+            // refresh it now that we know who this peer actually is.
+            const existing = participantStateRef.current.get(participant.id);
+            if (existing && existing.name !== participant.name) {
+                participantStateRef.current.set(participant.id, { ...existing, name: participant.name });
+                syncParticipants();
+            }
+
             // Must use ref: this handler is registered once; `isScreenSharing` state would be stale here.
             if (isScreenSharingRef.current && screenVideoTrackRef.current && currentRoomIdRef.current) {
                 socket.emit("screen-share-status", {
@@ -948,6 +1004,27 @@ export const Room = ({
         };
     }, [disposeMixedAudio]);
 
+    // Tell the server we're leaving when the tab closes / navigates away, so other
+    // peers don't have to wait for a ping timeout to see us disappear.
+    useEffect(() => {
+        const announceLeave = () => {
+            const s = socketRef.current;
+            if (!s) return;
+            try {
+                s.volatile.emit("leave-room");
+                s.disconnect();
+            } catch {
+                /* ignore */
+            }
+        };
+        window.addEventListener("pagehide", announceLeave);
+        window.addEventListener("beforeunload", announceLeave);
+        return () => {
+            window.removeEventListener("pagehide", announceLeave);
+            window.removeEventListener("beforeunload", announceLeave);
+        };
+    }, []);
+
     const remoteParticipants = useMemo(
         () => participants.filter((p) => p.id !== socketIdRef.current),
         [participants]
@@ -1011,6 +1088,13 @@ export const Room = ({
 
     const handleLeave = useCallback(() => {
         stopScreenShare();
+        // Tell the server before we drop the socket so the other peers see us leave
+        // immediately, instead of waiting for a ping timeout.
+        try {
+            socketRef.current?.emit("leave-room");
+        } catch {
+            /* socket already closed */
+        }
         peersRef.current.forEach((pc) => pc.close());
         peersRef.current.clear();
         remoteStreamsRef.current.clear();
@@ -1019,6 +1103,8 @@ export const Room = ({
         makingOfferRef.current.clear();
         cameraSendersRef.current.clear();
         audioSendersRef.current.clear();
+        peerDeathTimersRef.current.forEach((t) => window.clearTimeout(t));
+        peerDeathTimersRef.current.clear();
         disposeMixedAudio();
         socketRef.current?.disconnect();
         socketRef.current = null;
@@ -1057,25 +1143,21 @@ export const Room = ({
                 }}
             >
                 <div style={{ display: "flex", alignItems: "center", gap: "0.85rem", minWidth: 0 }}>
-                    <div
+                    <img
+                        src="/logo.png"
+                        alt="Closr"
+                        width={36}
+                        height={36}
                         style={{
                             width: 36,
                             height: 36,
                             borderRadius: 10,
-                            background: "linear-gradient(135deg, var(--primary), var(--accent))",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            color: "white",
-                            fontWeight: 800,
-                            fontSize: "0.95rem",
+                            objectFit: "cover",
                             flexShrink: 0,
+                            border: "1px solid var(--border)",
                             boxShadow: "0 10px 30px -10px var(--primary-glow)",
                         }}
-                        aria-hidden
-                    >
-                        C
-                    </div>
+                    />
                     <div style={{ display: "flex", flexDirection: "column", gap: "0.2rem", minWidth: 0 }}>
                         <div style={{ display: "flex", alignItems: "center", gap: "0.6rem", flexWrap: "wrap" }}>
                             <span style={{ fontSize: "0.95rem", fontWeight: 700, color: "var(--text-main)" }}>
@@ -1152,8 +1234,14 @@ export const Room = ({
                                         cursor: "pointer",
                                         fontWeight: 600,
                                         transition: "all 0.15s ease",
+                                        display: "inline-flex",
+                                        alignItems: "center",
+                                        gap: "0.3rem",
                                     }}
                                 >
+                                    <span className="msr sm" aria-hidden>
+                                        {copyConfirmed ? "check" : "content_copy"}
+                                    </span>
                                     {copyConfirmed ? "Copied" : "Copy"}
                                 </button>
                             </div>
@@ -1181,7 +1269,8 @@ export const Room = ({
                             transition: "all 0.18s ease",
                         }}
                     >
-                        👥 Participants
+                        <span className="msr sm" aria-hidden>group</span>
+                        Participants
                     </button>
                 </div>
             </div>
@@ -1236,6 +1325,7 @@ export const Room = ({
                                     label={`${sharingParticipant.name} is sharing`}
                                     prioritized
                                     muted
+                                    fitMode="contain"
                                 />
                             )}
                             <div className="tile-label" style={{ zIndex: 10 }}>
@@ -1357,7 +1447,7 @@ export const Room = ({
                     aria-label={micEnabled ? "Mute microphone" : "Unmute microphone"}
                     title={micEnabled ? "Mute microphone" : "Unmute microphone"}
                 >
-                    {micEnabled ? "🎙️" : "🔇"}
+                    <span className="msr" aria-hidden>{micEnabled ? "mic" : "mic_off"}</span>
                 </button>
 
                 <button
@@ -1367,7 +1457,7 @@ export const Room = ({
                     aria-label={camEnabled ? "Turn camera off" : "Turn camera on"}
                     title={camEnabled ? "Turn camera off" : "Turn camera on"}
                 >
-                    {camEnabled ? "📹" : "🚫"}
+                    <span className="msr" aria-hidden>{camEnabled ? "videocam" : "videocam_off"}</span>
                 </button>
 
                 <button
@@ -1377,7 +1467,9 @@ export const Room = ({
                     aria-label={isScreenSharing ? "Stop sharing your screen" : "Share your screen"}
                     title={isScreenSharing ? "Stop sharing" : "Share your screen"}
                 >
-                    🖥️
+                    <span className="msr" aria-hidden>
+                        {isScreenSharing ? "stop_screen_share" : "screen_share"}
+                    </span>
                 </button>
 
                 <button
@@ -1387,7 +1479,9 @@ export const Room = ({
                     aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
                     title={isFullscreen ? "Exit fullscreen" : "Fullscreen"}
                 >
-                    {isFullscreen ? "⤡" : "⤢"}
+                    <span className="msr" aria-hidden>
+                        {isFullscreen ? "fullscreen_exit" : "fullscreen"}
+                    </span>
                 </button>
 
                 <div style={{ width: 1, height: 26, background: "var(--border-strong)", margin: "0 0.25rem" }} />
@@ -1399,6 +1493,7 @@ export const Room = ({
                     aria-label="Leave call"
                     title="Leave call"
                 >
+                    <span className="msr sm" aria-hidden>call_end</span>
                     Leave
                 </button>
             </div>
