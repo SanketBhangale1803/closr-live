@@ -104,24 +104,21 @@ export const Landing = () => {
                 }}
             >
                 <div style={{ display: "flex", alignItems: "center", gap: "0.85rem" }}>
-                    <div
+                    <img
+                        src="/logo.png"
+                        alt="Closr"
+                        width={44}
+                        height={44}
                         style={{
-                            width: 40,
-                            height: 40,
+                            width: 44,
+                            height: 44,
                             borderRadius: 12,
-                            background: "linear-gradient(135deg, var(--primary), var(--accent))",
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            color: "white",
-                            fontWeight: 800,
-                            fontSize: "1.1rem",
+                            objectFit: "cover",
                             boxShadow: "0 10px 30px -10px var(--primary-glow)",
+                            background: "rgba(255,255,255,0.04)",
+                            border: "1px solid var(--border)",
                         }}
-                        aria-hidden
-                    >
-                        C
-                    </div>
+                    />
                     <div style={{ display: "flex", flexDirection: "column" }}>
                         <span style={{ fontWeight: 800, fontSize: "1.15rem", letterSpacing: "-0.01em" }}>
                             Closr
@@ -235,7 +232,7 @@ export const Landing = () => {
                                     aria-label={micEnabled ? "Mute microphone" : "Unmute microphone"}
                                     title={micEnabled ? "Mute microphone" : "Unmute microphone"}
                                 >
-                                    {micEnabled ? "🎙️" : "🔇"}
+                                    <span className="msr" aria-hidden>{micEnabled ? "mic" : "mic_off"}</span>
                                 </button>
                                 <span className="ctrl-label">{micEnabled ? "Mic on" : "Mic off"}</span>
                             </div>
@@ -248,7 +245,7 @@ export const Landing = () => {
                                     aria-label={camEnabled ? "Turn camera off" : "Turn camera on"}
                                     title={camEnabled ? "Turn camera off" : "Turn camera on"}
                                 >
-                                    {camEnabled ? "📹" : "🚫"}
+                                    <span className="msr" aria-hidden>{camEnabled ? "videocam" : "videocam_off"}</span>
                                 </button>
                                 <span className="ctrl-label">{camEnabled ? "Camera on" : "Camera off"}</span>
                             </div>
@@ -274,6 +271,31 @@ export const Landing = () => {
                     {/* Right: join card */}
                     <div className="card" style={{ display: "flex", flexDirection: "column", gap: "1.5rem" }}>
                         <div>
+                            <div style={{ display: "flex", alignItems: "center", gap: "0.75rem", marginBottom: "1rem" }}>
+                                <img
+                                    src="/logo.png"
+                                    alt=""
+                                    width={56}
+                                    height={56}
+                                    style={{
+                                        width: 56,
+                                        height: 56,
+                                        borderRadius: 16,
+                                        objectFit: "cover",
+                                        boxShadow: "0 14px 40px -12px var(--primary-glow)",
+                                        border: "1px solid var(--border)",
+                                    }}
+                                />
+                                <span
+                                    style={{
+                                        fontSize: "1.15rem",
+                                        fontWeight: 700,
+                                        letterSpacing: "-0.01em",
+                                    }}
+                                >
+                                    Closr
+                                </span>
+                            </div>
                             <h1
                                 style={{
                                     fontSize: "2.1rem",
@@ -390,13 +412,19 @@ export const Landing = () => {
                                 borderTop: "1px solid var(--border)",
                                 paddingTop: "1rem",
                                 display: "flex",
-                                gap: "1rem",
+                                gap: "1.25rem",
                                 color: "var(--text-muted)",
                                 fontSize: "0.78rem",
                             }}
                         >
-                            <span>🔒 End-to-end peer-to-peer</span>
-                            <span>⚡ Low-latency Opus audio</span>
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
+                                <span className="msr sm" aria-hidden>lock</span>
+                                Peer-to-peer encrypted
+                            </span>
+                            <span style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem" }}>
+                                <span className="msr sm" aria-hidden>bolt</span>
+                                Low-latency Opus
+                            </span>
                         </div>
                     </div>
                 </div>

@@ -29,14 +29,10 @@ const io = new Server(server, {
         origin: "*",
         methods: ["GET", "POST"]
     },
-    // Tolerate brief network blips and platform pauses (e.g. mobile background,
-    // cloud load balancers) before tearing the socket — and the room — down.
-    pingInterval: 25_000,
-    pingTimeout: 60_000,
-    connectionStateRecovery: {
-        maxDisconnectionDuration: 2 * 60_000,
-        skipMiddlewares: true,
-    },
+    // Detect tab-close / network drop within ~20s instead of the previous minutes,
+    // so the other peers' tiles disappear promptly when someone leaves.
+    pingInterval: 10_000,
+    pingTimeout: 20_000,
 });
 
 const userManager = new UserManager();
