@@ -4,7 +4,8 @@
     "description": "Socket.IO signaling for Closr (group WebRTC calls)",
     "scripts": {
         "build": "cd backend && npm install && npm run build",
-        "start": "node backend/dist/index.js"
+        "start": "node backend/dist/index.js",
+        "tunnel": "bash scripts/serve-with-ngrok.sh"
     },
     "keywords": [],
     "author": "",
