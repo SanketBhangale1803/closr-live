@@ -5,7 +5,13 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BACKEND="$ROOT/backend"
-PORT="${PORT:-3000}"
+# JobPilot currently uses port 3000 on this laptop, so Closr defaults to 3001.
+# Override when needed: CLOSR_PORT=4000 npm run tunnel
+PORT="${CLOSR_PORT:-3001}"
+
+is_closr_backend() {
+  [ "$(curl -sf "http://127.0.0.1:${PORT}/" 2>/dev/null)" = "Closr signaling server is running" ]
+}
 
 if ! command -v ngrok >/dev/null 2>&1; then
   echo "ngrok not found. Install: brew install ngrok"
@@ -13,24 +19,24 @@ if ! command -v ngrok >/dev/null 2>&1; then
   exit 1
 fi
 
-if ! curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+if ! is_closr_backend; then
   echo "Starting backend on port ${PORT}..."
   (
     cd "$BACKEND"
     npm run build
-    npm run start
+    PORT="$PORT" npm run start
   ) &
   BACKEND_PID=$!
   trap 'kill "$BACKEND_PID" 2>/dev/null || true' EXIT
 
   for i in $(seq 1 30); do
-    if curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+    if is_closr_backend; then
       break
     fi
     sleep 0.5
   done
 
-  if ! curl -sf "http://127.0.0.1:${PORT}/health" >/dev/null 2>&1; then
+  if ! is_closr_backend; then
     echo "Backend failed to start on port ${PORT}"
     exit 1
   fi
